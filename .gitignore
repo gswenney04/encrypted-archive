@@ -1,0 +1,6 @@
+/private/
+/restored*/
+*.decrypted.*
+*.zip
+*.pdf
+.env*
