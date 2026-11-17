@@ -9,7 +9,7 @@ for(const file of ['docs/content.enc.json','research/continuation.enc.json']){
  const key=await webcrypto.subtle.deriveKey({name:'PBKDF2',hash:'SHA-256',salt:bytes(e.salt),iterations:e.iterations},material,{name:'AES-GCM',length:256},false,['decrypt']);
  const zipped=await webcrypto.subtle.decrypt({name:'AES-GCM',iv:bytes(e.iv),additionalData:new TextEncoder().encode(e.aad),tagLength:128},key,bytes(e.ciphertext));
  const clear=await new Response(new Blob([zipped]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
- if(file.startsWith('docs/')){const scripts=[...clear.matchAll(/<script>([\s\S]*?)<\/script>/g)];if(scripts.length!==2)throw Error('Wrong script count');for(const [,js]of scripts)new vm.Script(js);}
+ if(file.startsWith('docs/')){const scripts=[...clear.matchAll(/<script>([\s\S]*?)<\/script>/g)];if(scripts.length<2)throw Error('Wrong script count');for(const [,js]of scripts)new vm.Script(js);}
  else if(JSON.parse(clear).format!=='encrypted-archive-workspace')throw Error('Wrong bundle');
 }
 console.log('PASS: Web Crypto and DecompressionStream interoperability; decrypted inline JavaScript parses. Browser UI checks still required.');

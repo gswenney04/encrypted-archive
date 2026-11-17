@@ -1,7 +1,7 @@
 // Dependency-free Node.js 20+ encryption and restore tool. No network calls.
 import fs from 'node:fs';
 import path from 'node:path';
-import {randomBytes,pbkdf2Sync,createCipheriv,createDecipheriv} from 'node:crypto';
+import {randomBytes,pbkdf2Sync,createCipheriv,createDecipheriv,createHash} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {fileURLToPath} from 'node:url';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -26,19 +26,27 @@ if(!['build','restore','test'].includes(mode)){console.error('Usage: supply pass
 const secret=await password();if(!secret)throw Error('Empty password rejected');
 const priv=path.join(root,'private');
 if(mode==='build'){
- const dist=path.join(priv,'dist'),read=n=>fs.readFileSync(path.join(dist,n),'utf8');
+ const dist=path.join(priv,'dist'),read=n=>fs.readFileSync(path.join(dist,n),'utf8'),has=n=>/^[\w.-]+$/.test(n)&&fs.existsSync(path.join(dist,n));
+ const inlineJs=t=>t.replace(/<\/script/gi,'<\\/script'),json=v=>JSON.stringify(v).replaceAll('<','\\u003c');
  let html=read('index.html');
- for(const file of ['style.css','archive.css'])html=html.replace(`<link rel="stylesheet" href="${file}">`,`<style>${read(file)}</style>`);
- const data=read('archive.json').replaceAll('<','\\u003c');
- let js=read('archive-app.js').replace("fetch('archive.json').then(r=>{if(!r.ok)throw Error();return r.json();})",`Promise.resolve(${data})`);
- for(const file of ['research-dossier.md','maintenance.md']){
-  const payload=JSON.stringify(read(file)).replaceAll('<','\\u003c');
-  js+=`\ndocument.addEventListener('click',e=>{const a=e.target.closest('a[href="${file}"]');if(a){e.preventDefault();const u=URL.createObjectURL(new Blob([${payload}],{type:'text/markdown'}));const d=document.createElement('a');d.href=u;d.download='${file}';d.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}});`;
+ html=html.replace(/<link rel="stylesheet" href="([^"]+)">/g,(m,f)=>has(f)?`<style>${read(f)}</style>`:m);
+ // Photos: encrypted one by one into docs/m/ with a key that exists only inside the encrypted page.
+ const mdir=path.join(priv,'media'),out=path.join(root,'docs/m'),items=[];let mkey=null;
+ if(fs.existsSync(path.join(mdir,'manifest.json'))){
+  mkey=JSON.parse(fs.readFileSync(path.join(mdir,'key.json'),'utf8')).b;const K=Buffer.from(mkey,'base64');
+  const sealFile=(src,dst)=>{const iv=randomBytes(12),c=createCipheriv('aes-256-gcm',K,iv);fs.writeFileSync(dst,Buffer.concat([iv,c.update(fs.readFileSync(src)),c.final(),c.getAuthTag()]));};
+  fs.mkdirSync(out,{recursive:true});const keep=new Set();
+  for(const m of JSON.parse(fs.readFileSync(path.join(mdir,'manifest.json'),'utf8')).items){
+   if(!m.display||!m.person)continue;const fid=createHash('sha256').update(mkey+m.key).digest('hex').slice(0,20);keep.add(fid+'.bin');keep.add(fid+'.t.bin');
+   if(!fs.existsSync(path.join(out,fid+'.bin'))){sealFile(path.join(mdir,'img',m.key+'.jpg'),path.join(out,fid+'.bin'));sealFile(path.join(mdir,'thumb',m.key+'.jpg'),path.join(out,fid+'.t.bin'));}
+   const {key,display,hidden_reason,...rec}=m;items.push({...rec,enc:'m/'+fid+'.bin',thumb:'m/'+fid+'.t.bin',k:'b'});}
+  for(const f of fs.readdirSync(out))if(!keep.has(f))fs.rmSync(path.join(out,f));
  }
- js+="\ndocument.getElementById('lock-archive').addEventListener('click',()=>location.reload());\n";
- // Avoid automatic third-party image requests. Source links remain user-initiated.
- js=js.replace('${m.image_url?', '${false&&m.image_url?');
- html=html.replace('<script src="tree-layout.js"></script>',`<script>${read('tree-layout.js')}</script>`).replace('<script src="archive-app.js"></script>',()=>`<script>${js.replace(/<\/script/gi,'<\\/script')}</script>`);
+ const pidsFile=path.join(mdir,'pids.json'),pids=fs.existsSync(pidsFile)?JSON.parse(fs.readFileSync(pidsFile,'utf8')):{};
+ const docs={};for(const f of ['research-dossier.md','maintenance.md'])if(has(f))docs[f]=read(f);
+ html=html.replace('<script src="archive-data.js"></script>',()=>`<script>window.ARCHIVE=${read('archive.json').replaceAll('<','\\u003c')};window.ARCHIVE_DOCS=${json(docs)};window.ARCHIVE_MEDIA=${json({key:mkey,items,pids})};</script>`);
+ html=html.replace(/<script src="([^"]+)"><\/script>/g,(m,f)=>has(f)?`<script>${inlineJs(read(f))}</script>`:m);
+ if(/<script src=|<link rel="stylesheet"/.test(html))throw Error('Unresolved page dependency');
  const site=encrypt(Buffer.from(html),secret);
  const bundle={format:'encrypted-archive-workspace',version:1,files:walk(priv)};
  const handoff=encrypt(Buffer.from(JSON.stringify(bundle)),secret);
@@ -61,6 +69,6 @@ if(mode==='build'){
   }
  }
  const html=decrypt(JSON.parse(fs.readFileSync(path.join(root,'docs/content.enc.json'))),secret).toString();
- if(/src="(?:archive|tree-layout)|fetch\('archive.json'\)/.test(html))throw Error('Plaintext dependency remains');
+ if(/<script src=|<link rel="stylesheet"|fetch\('archive.json'\)/.test(html))throw Error('Plaintext dependency remains');
  console.log('PASS: decryption, wrong-password rejection, tamper rejection, self-contained content.');
 }
